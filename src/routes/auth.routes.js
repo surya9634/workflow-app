@@ -39,5 +39,6 @@ router.get('/facebook', authController.facebookLogin);
 router.get('/facebook/callback', authController.facebookCallback);
 router.get('/google', authController.googleLogin);
 router.get('/google/callback', authController.googleCallback);
+router.post('/google', authController.googleAuth);
 
 export default router;

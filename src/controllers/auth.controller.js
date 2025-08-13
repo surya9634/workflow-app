@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { StatusCodes } from 'http-status-codes';
 import bcrypt from 'bcryptjs';
+import { OAuth2Client } from 'google-auth-library';
 import config from '../config/config.js';
 import { createError } from '../utils/error.js';
 
@@ -190,18 +191,179 @@ export const facebookCallback = (req, res) => {
 };
 
 // Social authentication - Google
-export const googleLogin = (req, res) => {
-  // Implementation for Google login
-  res.status(StatusCodes.NOT_IMPLEMENTED).json({
-    success: false,
-    message: 'Google login not implemented yet',
-  });
+export const googleLogin = async (req, res) => {
+  try {
+    const oauth2Client = new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      `${process.env.API_BASE_URL || 'http://localhost:5000'}/auth/google/callback`
+    );
+
+    // Generate the URL for Google's OAuth 2.0 server
+    const authorizeUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: [
+        'https://www.googleapis.com/auth/userinfo.profile',
+        'https://www.googleapis.com/auth/userinfo.email'
+      ],
+      prompt: 'consent'
+    });
+
+    res.redirect(authorizeUrl);
+  } catch (error) {
+    console.error('Google login error:', error);
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      success: false,
+      message: 'Error initiating Google authentication'
+    });
+  }
 };
 
-export const googleCallback = (req, res) => {
-  // Implementation for Google callback
-  res.status(StatusCodes.NOT_IMPLEMENTED).json({
-    success: false,
-    message: 'Google callback not implemented yet',
-  });
+// Handle Google OAuth callback
+export const googleCallback = async (req, res) => {
+  try {
+    const { code } = req.query;
+    
+    if (!code) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        success: false,
+        message: 'Authorization code is required'
+      });
+    }
+
+    const oauth2Client = new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      `${process.env.API_BASE_URL || 'http://localhost:5000'}/auth/google/callback`
+    );
+
+    // Exchange authorization code for tokens
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    // Get user info
+    const ticket = await oauth2Client.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name, picture } = payload;
+
+    // Find or create user in your database
+    let user = users.find(u => u.googleId === googleId || u.email === email);
+    
+    if (!user) {
+      // Create new user
+      user = {
+        id: Date.now().toString(),
+        googleId,
+        email,
+        name,
+        avatar: picture,
+        password: null, // No password for Google-authenticated users
+        role: 'user',
+        isActive: true,
+        emailVerified: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      users.push(user);
+    } else if (!user.googleId) {
+      // Link Google account to existing user
+      user.googleId = googleId;
+      user.updatedAt = new Date().toISOString();
+    }
+
+    // Generate JWT token
+    const token = generateToken(user.id);
+    const refreshToken = jwt.sign({ userId: user.id }, config.jwt.secret, {
+      expiresIn: '30d',
+    });
+
+    // Remove sensitive data
+    const { password: _, ...userWithoutPassword } = user;
+
+    // Redirect to frontend with tokens
+    const redirectUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:3000');
+    redirectUrl.searchParams.set('token', token);
+    redirectUrl.searchParams.set('refreshToken', refreshToken);
+    redirectUrl.searchParams.set('user', JSON.stringify(userWithoutPassword));
+
+    res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('Google callback error:', error);
+    
+    // Redirect to frontend with error
+    const redirectUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:3000/login');
+    redirectUrl.searchParams.set('error', 'google_auth_failed');
+    
+    res.redirect(redirectUrl.toString());
+  }
+};
+
+// Handle Google credential-based sign-in
+export const googleAuth = async (req, res, next) => {
+  try {
+    const { credential } = req.body;
+    
+    if (!credential) {
+      return next(createError(StatusCodes.BAD_REQUEST, 'Credential is required'));
+    }
+
+    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name, picture } = payload;
+
+    // Find or create user in your database
+    let user = users.find(u => u.googleId === googleId || u.email === email);
+    
+    if (!user) {
+      // Create new user
+      user = {
+        id: Date.now().toString(),
+        googleId,
+        email,
+        name,
+        avatar: picture,
+        password: null, // No password for Google-authenticated users
+        role: 'user',
+        isActive: true,
+        emailVerified: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      users.push(user);
+    } else if (!user.googleId) {
+      // Link Google account to existing user
+      user.googleId = googleId;
+      user.updatedAt = new Date().toISOString();
+    }
+
+    // Generate tokens
+    const token = generateToken(user.id);
+    const refreshToken = jwt.sign({ userId: user.id }, config.jwt.secret, {
+      expiresIn: '30d',
+    });
+
+    // Remove sensitive data
+    const { password: _, ...userWithoutPassword } = user;
+
+    res.status(StatusCodes.OK).json({
+      success: true,
+      data: {
+        user: userWithoutPassword,
+        token,
+        refreshToken,
+      },
+    });
+  } catch (error) {
+    console.error('Google authentication error:', error);
+    next(createError(StatusCodes.UNAUTHORIZED, 'Google authentication failed'));
+  }
 };
