@@ -1,7 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { StatusCodes } from 'http-status-codes';
 import bcrypt from 'bcryptjs';
-import { OAuth2Client } from 'google-auth-library';
 import config from '../config/config.js';
 import { createError } from '../utils/error.js';
 
